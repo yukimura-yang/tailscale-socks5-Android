@@ -112,6 +112,12 @@ func (t *TsProxy) ServeSOCKS(bind, tcp4, tcp6, udp4, udp6 string) {
 			socksLog("ResolveTCPAddr error: %v", err)
 			return nil, err
 		}
+		// Domain resolved to a Tailscale IP: route through tsnet, the OS
+		// network stack cannot reach the tailnet.
+		if ra.IP != nil && isTailscaleIPString(ra.IP.String()) {
+			socksLog("Using tsnet Dial for resolved Tailscale IP: %s", ra.String())
+			return tsDial(t.tsServer, network, ra.String())
+		}
 		a2, _ := net.ResolveTCPAddr("tcp", tcp6)
 		if ra.IP.To4() != nil {
 			a2, _ = net.ResolveTCPAddr("tcp", tcp4)
@@ -224,6 +230,11 @@ func (t *TsProxy) DualSOCKS(bind, tcp4, tcp6, udp4, udp6 string) {
 		ra, err := net.ResolveTCPAddr("tcp", raddr)
 		if err != nil {
 			return nil, err
+		}
+		// Domain resolved to a Tailscale IP: route through tsnet, the OS
+		// network stack cannot reach the tailnet.
+		if ra.IP != nil && isTailscaleIPString(ra.IP.String()) {
+			return tsDial(t.tsServer, network, ra.String())
 		}
 		a2, _ := net.ResolveTCPAddr("tcp", tcp6)
 		if ra.IP.To4() != nil {

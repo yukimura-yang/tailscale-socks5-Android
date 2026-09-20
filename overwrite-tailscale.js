@@ -2,7 +2,7 @@
 // Tailscale 覆写脚本 (FlClash / Mihomo JS Override)
 //
 // 前提：
-//   1. ts-proxy Android App 已启动，SOCKS5 监听 127.0.0.1:1080
+//   1. ts-proxy Android App 已启动，SOCKS5 监听 127.0.0.1:8964
 //   2. FlClash 已启用
 //
 // 使用方法：
@@ -36,10 +36,10 @@ const main = (config) => {
     name: "tailscale",
     type: "socks5",
     server: "127.0.0.1",
-    port: 1080,
+    port: 8964,
     udp: true,
   });
-  console.log("[tailscale] 节点: socks5://127.0.0.1:1080");
+  console.log("[tailscale] 节点: socks5://127.0.0.1:8964");
 
   // === 2. 添加 Tailscale 策略组 ===
   let tsGroup = config["proxy-groups"].find(g => g.name === "Tailscale");
@@ -57,9 +57,9 @@ const main = (config) => {
     "DOMAIN-SUFFIX,derp.tailscale.com,Tailscale",
     // Tailscale 域名（node1.ts.net 等）
     "DOMAIN-SUFFIX,ts.net,Tailscale",
-    // Tailscale 网段（no-resolve 阻止 DNS 预解析）
-    "IP-CIDR,100.64.0.0/10,Tailscale,no-resolve",
-    "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale,no-resolve",
+    // Tailscale 网段
+    "IP-CIDR,100.64.0.0/10,Tailscale",
+    "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale",
   ];
 
   // 去重

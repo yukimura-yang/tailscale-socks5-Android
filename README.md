@@ -6,7 +6,7 @@
 
 Android 只能同时跑一个 VPN。Tailscale 占了 VPN slot，Clash 就没法用 TUN 模式。
 
-本项目：Tailscale 用 userspace 模式跑，输出本地 SOCKS5 代理（127.0.0.1:1080），不占 VPN slot。VPN slot 留给 Clash。覆写脚本把 Tailscale 流量路由到 ts-proxy。
+本项目：Tailscale 用 userspace 模式跑，输出本地 SOCKS5 代理（127.0.0.1:8964），不占 VPN slot。VPN slot 留给 Clash。覆写脚本把 Tailscale 流量路由到 ts-proxy。
 
 ## 支持
 
@@ -33,7 +33,7 @@ const main = (config) => {
   config.proxies = (config.proxies || []).filter(p => p.name !== "tailscale");
   config.proxies.unshift({
     name: "tailscale", type: "socks5",
-    server: "127.0.0.1", port: 1080, udp: true,
+    server: "127.0.0.1", port: 8964, udp: true,
   });
 
   let g = (config["proxy-groups"] || []).find(g => g.name === "Tailscale");
@@ -47,8 +47,8 @@ const main = (config) => {
   const rules = [
     "DOMAIN-SUFFIX,derp.tailscale.com,Tailscale",
     "DOMAIN-SUFFIX,ts.net,Tailscale",
-    "IP-CIDR,100.64.0.0/10,Tailscale,no-resolve",
-    "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale,no-resolve",
+    "IP-CIDR,100.64.0.0/10,Tailscale",
+    "IP-CIDR,fd7a:115c:a1e0::/48,Tailscale",
   ];
   const existing = new Set(config.rules.map(r => r.trim()));
   for (const r of rules.filter(r => !existing.has(r)).reverse()) {
