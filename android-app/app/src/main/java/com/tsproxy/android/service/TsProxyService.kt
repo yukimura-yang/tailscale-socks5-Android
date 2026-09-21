@@ -5,112 +5,138 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.tsproxy.android.R
 import com.tsproxy.android.TsProxyApp
 import com.tsproxy.android.ui.MainActivity
 import tsproxy.Tsproxy
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class TsProxyService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private val executor = Executors.newSingleThreadExecutor()
+    private val running = AtomicBoolean(false)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        // 1. 系统杀掉重启 intent 为 null，从 prefs 恢复
+        val action = intent?.action
+        if (action == null) {
+            val prefs = Prefs(this)
+            if (prefs.hasConfig()) {
+                startProxy(prefs.socks, prefs.hostname, prefs.dir)
+            } else {
+                stopSelf()
+            }
+            return START_REDELIVER_INTENT
+        }
+
+        when (action) {
             ACTION_START -> {
-                val socks = intent.getStringExtra(EXTRA_SOCKS) ?: "127.0.0.1:1080"
-                val hostname = intent.getStringExtra(EXTRA_HOSTNAME) ?: "ts-socks5"
-                val tsnetDir = intent.getStringExtra(EXTRA_TSNET_DIR) ?: ""
+                val socks = intent.getStringExtra(EXTRA_SOCKS) ?: Prefs(this).socks ?: "127.0.0.1:1080"
+                val hostname = intent.getStringExtra(EXTRA_HOSTNAME) ?: Prefs(this).hostname ?: "ts-socks5"
+                var tsnetDir = intent.getStringExtra(EXTRA_TSNET_DIR) ?: Prefs(this).dir ?: ""
+                if (tsnetDir.isEmpty()) tsnetDir = "${filesDir.absolutePath}/tsnet"
+                // 落盘，下次被杀能恢复
+                Prefs(this).save(socks, hostname, tsnetDir)
                 startProxy(socks, hostname, tsnetDir)
             }
-            ACTION_STOP -> {
-                stopProxy()
-            }
+            ACTION_STOP -> stopProxy()
         }
-        return START_STICKY
+        // 2. REDELIVER 会把原始 Intent（含参数）重发，比 STICKY 稳得多
+        return START_REDELIVER_INTENT
     }
 
-    private fun acquireWakeLock() {
+    private fun acquireLocks() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "ts-proxy::keepalive"
-            )
-            wakeLock?.acquire(24 * 60 * 60 * 1000L) // 24 hours
-            TsProxyApp.appendLog("WakeLock acquired")
+            if (wakeLock == null) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ts-proxy::keepalive").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld != true) wakeLock?.acquire() // 不带超时，stop 时手动放
+
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            if (wifiLock == null) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ts-proxy::wifilock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiLock?.isHeld != true) wifiLock?.acquire()
+            TsProxyApp.appendLog("locks acquired")
         } catch (e: Exception) {
-            TsProxyApp.appendLog("WakeLock failed: ${e.message}")
+            TsProxyApp.appendLog("lock failed: ${e.message}")
         }
     }
 
-    private fun releaseWakeLock() {
+    private fun releaseLocks() {
         try {
-            wakeLock?.let {
-                if (it.isHeld) {
-                    it.release()
-                    TsProxyApp.appendLog("WakeLock released")
-                }
-            }
-            wakeLock = null
-        } catch (e: Exception) {
-            TsProxyApp.appendLog("WakeLock release error: ${e.message}")
-        }
+            wakeLock?.let { if (it.isHeld) it.release() }
+            wifiLock?.let { if (it.isHeld) it.release() }
+        } catch (_: Exception) {}
+        wakeLock = null
+        wifiLock = null
     }
 
     private fun startProxy(socks: String, hostname: String, tsnetDir: String) {
+        if (!running.compareAndSet(false, true)) {
+            TsProxyApp.appendLog("startProxy: already running, ignore")
+            return
+        }
         val notification = buildNotification("Starting ts-socks5...")
-        startForeground(NOTIFICATION_ID, notification)
-
-        acquireWakeLock()
-
-        val resolvedDir = tsnetDir.ifEmpty {
-            "${filesDir.absolutePath}/tsnet"
+        // 3. Android 10+/14 前台类型必须带上，否则后台存活时间很短
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
         }
 
-        TsProxyApp.appendLog("startProxy: socks=$socks host=$hostname dir=$resolvedDir")
+        acquireLocks()
+        TsProxyApp.appendLog("startProxy: socks=$socks host=$hostname dir=$tsnetDir")
 
-        Thread({
+        executor.execute {
             try {
-                val result = Tsproxy.start(socks, hostname, resolvedDir)
+                val result = Tsproxy.start(socks, hostname, tsnetDir)
                 val status = when {
                     result.startsWith("ERROR:") -> "Failed: ${result.removePrefix("ERROR: ").take(80)}"
                     else -> "Running on $socks"
                 }
                 TsProxyApp.appendLog("Tsproxy.start returned: $status")
                 updateNotification(status)
+                // Tsproxy.start 如果返回了说明退出了，标记不在运行，方便下次拉起
+                if (result.startsWith("ERROR:")) running.set(false)
             } catch (e: Exception) {
-                val sw = java.io.StringWriter()
-                e.printStackTrace(java.io.PrintWriter(sw))
-                TsProxyApp.appendLog("startProxy EXCEPTION: $sw")
-                Log.e(TAG, "Start failed with exception", e)
+                running.set(false)
+                TsProxyApp.appendLog("startProxy EXCEPTION: ${Log.getStackTraceString(e)}")
                 updateNotification("Crash: ${e.message?.take(80) ?: "unknown"}")
             }
-        }, "ts-proxy-start").start()
+        }
     }
 
     private fun stopProxy() {
-        Thread({
-            try {
-                Tsproxy.stop()
-                TsProxyApp.appendLog("stopProxy: stopped")
-            } catch (e: Exception) {
-                TsProxyApp.appendLog("stopProxy EXCEPTION: ${e.message}")
+        executor.execute {
+            try { Tsproxy.stop() } catch (e: Exception) {
                 Log.e(TAG, "Stop failed", e)
             } finally {
-                releaseWakeLock()
+                running.set(false)
+                releaseLocks()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-        }, "ts-proxy-stop").start()
+        }
     }
 
     private fun buildNotification(text: String): Notification {
@@ -118,7 +144,8 @@ class TsProxyService : Service() {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         val pendingIntent = PendingIntent.getActivity(
-            this, 0, tapIntent, PendingIntent.FLAG_IMMUTABLE
+            this, 0, tapIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         return NotificationCompat.Builder(this, TsProxyApp.CHANNEL_ID)
             .setContentTitle("ts-socks5")
@@ -141,9 +168,13 @@ class TsProxyService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Restart service when user swipes app from recents
+        // 4. 划掉任务栏也要带上参数重启
+        val prefs = Prefs(this)
         val restartIntent = Intent(applicationContext, TsProxyService::class.java).apply {
             action = ACTION_START
+            putExtra(EXTRA_SOCKS, prefs.socks)
+            putExtra(EXTRA_HOSTNAME, prefs.hostname)
+            putExtra(EXTRA_TSNET_DIR, prefs.dir)
         }
         val pendingIntent = PendingIntent.getService(
             applicationContext, 1, restartIntent,
@@ -151,7 +182,7 @@ class TsProxyService : Service() {
         )
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
         alarmManager.set(
-            android.app.AlarmManager.ELAPSED_REALTIME,
+            android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
             android.os.SystemClock.elapsedRealtime() + 1000,
             pendingIntent
         )
@@ -159,8 +190,20 @@ class TsProxyService : Service() {
     }
 
     override fun onDestroy() {
-        releaseWakeLock()
+        releaseLocks()
         super.onDestroy()
+    }
+
+    // 简单 prefs 封装，放同文件底下就行
+    private class Prefs(ctx: Context) {
+        private val sp = ctx.getSharedPreferences("ts-proxy", Context.MODE_PRIVATE)
+        val socks: String? get() = sp.getString("socks", null)
+        val hostname: String? get() = sp.getString("hostname", null)
+        val dir: String? get() = sp.getString("dir", null)
+        fun hasConfig() = socks != null
+        fun save(s: String, h: String, d: String) {
+            sp.edit().putString("socks", s).putString("hostname", h).putString("dir", d).apply()
+        }
     }
 
     companion object {
@@ -179,14 +222,14 @@ class TsProxyService : Service() {
                 putExtra(EXTRA_HOSTNAME, hostname)
                 putExtra(EXTRA_TSNET_DIR, tsnetDir)
             }
-            context.startForegroundService(intent)
+            androidx.core.content.ContextCompat.startForegroundService(context, intent)
         }
 
         fun stop(context: Context) {
             val intent = Intent(context, TsProxyService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            androidx.core.content.ContextCompat.startForegroundService(context, intent)
         }
     }
 }
