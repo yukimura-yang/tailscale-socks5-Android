@@ -33,8 +33,11 @@ class TsProxyService : Service() {
         val action = intent?.action
         if (action == null) {
             val prefs = Prefs(this)
-            if (prefs.hasConfig()) {
-                startProxy(prefs.socks, prefs.hostname, prefs.dir)
+            val socks = prefs.socks
+            val hostname = prefs.hostname
+            val dir = prefs.dir
+            if (socks != null && hostname != null && dir != null) {
+                startProxy(socks, hostname, dir)
             } else {
                 stopSelf()
             }
@@ -168,13 +171,16 @@ class TsProxyService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // 4. 划掉任务栏也要带上参数重启
-        val prefs = Prefs(this)
+    val prefs = Prefs(this)
+    val socks = prefs.socks
+    val hostname = prefs.hostname
+    val dir = prefs.dir
+    if (socks != null && hostname != null && dir != null) {
         val restartIntent = Intent(applicationContext, TsProxyService::class.java).apply {
             action = ACTION_START
-            putExtra(EXTRA_SOCKS, prefs.socks)
-            putExtra(EXTRA_HOSTNAME, prefs.hostname)
-            putExtra(EXTRA_TSNET_DIR, prefs.dir)
+            putExtra(EXTRA_SOCKS, socks)
+            putExtra(EXTRA_HOSTNAME, hostname)
+            putExtra(EXTRA_TSNET_DIR, dir)
         }
         val pendingIntent = PendingIntent.getService(
             applicationContext, 1, restartIntent,
@@ -186,6 +192,7 @@ class TsProxyService : Service() {
             android.os.SystemClock.elapsedRealtime() + 1000,
             pendingIntent
         )
+    }
         super.onTaskRemoved(rootIntent)
     }
 
@@ -200,7 +207,7 @@ class TsProxyService : Service() {
         val socks: String? get() = sp.getString("socks", null)
         val hostname: String? get() = sp.getString("hostname", null)
         val dir: String? get() = sp.getString("dir", null)
-        fun hasConfig() = socks != null
+        fun hasConfig() = socks != null && hostname != null && dir != null
         fun save(s: String, h: String, d: String) {
             sp.edit().putString("socks", s).putString("hostname", h).putString("dir", d).apply()
         }
