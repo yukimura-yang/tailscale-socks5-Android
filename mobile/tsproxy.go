@@ -268,11 +268,23 @@ func bootServer(srv *tsnet.Server, socksAddr string) {
 	tsp.SetSocksLogf(logBuf.write)
 
 	logBuf.write("Step 3: Serving SOCKS5 on %s", socksAddr)
+	// Publish the running state before starting ServeSOCKS. ServeSOCKS blocks
+	// until the listener exits; its exit path below will clear this state so
+	// the Android service can detect a dead proxy and restart it.
+	mu.Lock()
+	server = srv
+	proxy = p
+	running = true
+	loginURL = ""
+	mu.Unlock()
+	logBuf.write("ts-proxy is running!")
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				logBuf.write("SOCKS panic: %v", r)
 			}
+			markServerStopped(srv)
 		}()
 		logBuf.write("About to call p.ServeSOCKS(%s, ...)", socksAddr)
 		p.ServeSOCKS(socksAddr, "", "", "", "")
@@ -289,14 +301,27 @@ func bootServer(srv *tsnet.Server, socksAddr string) {
 		verifyConn.Close()
 		logBuf.write("SOCKS5 port is listening")
 	}
+}
 
+// markServerStopped clears the native running state when the SOCKS5 listener
+// exits unexpectedly. Stop() clears server first, so an intentional stop is
+// not mistaken for an unexpected exit and does not trigger duplicate cleanup.
+func markServerStopped(srv *tsnet.Server) {
 	mu.Lock()
-	server = srv
-	proxy = p
-	running = true
+	if server != srv {
+		mu.Unlock()
+		return
+	}
+	server = nil
+	proxy = nil
+	running = false
 	loginURL = ""
 	mu.Unlock()
-	logBuf.write("ts-proxy is running!")
+
+	logBuf.write("SOCKS5 server stopped unexpectedly")
+	if err := srv.Close(); err != nil {
+		logBuf.write("tsnet close after SOCKS5 exit: %v", err)
+	}
 }
 
 func GetLoginURL() string {

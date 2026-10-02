@@ -10,6 +10,9 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.tsproxy.android.R
@@ -25,6 +28,28 @@ class TsProxyService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private val executor = Executors.newSingleThreadExecutor()
     private val running = AtomicBoolean(false)
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    private var desiredRunning = false
+    private var lastStartElapsed = 0L
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!desiredRunning) return
+
+            val now = SystemClock.elapsedRealtime()
+            if (!Tsproxy.isRunning() && now - lastStartElapsed >= RESTART_COOLDOWN_MS) {
+                val prefs = Prefs(this@TsProxyService)
+                val socks = prefs.socks
+                val hostname = prefs.hostname
+                val dir = prefs.dir
+                if (socks != null && hostname != null && dir != null) {
+                    TsProxyApp.appendLog("watchdog: native proxy is not running, restarting")
+                    startProxy(socks, hostname, dir)
+                }
+            }
+            watchdogHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -37,8 +62,10 @@ class TsProxyService : Service() {
             val hostname = prefs.hostname
             val dir = prefs.dir
             if (socks != null && hostname != null && dir != null) {
+                desiredRunning = true
                 startProxy(socks, hostname, dir)
             } else {
+                desiredRunning = false
                 stopSelf()
             }
             return START_REDELIVER_INTENT
@@ -52,9 +79,14 @@ class TsProxyService : Service() {
                 if (tsnetDir.isEmpty()) tsnetDir = "${filesDir.absolutePath}/tsnet"
                 // 落盘，下次被杀能恢复
                 Prefs(this).save(socks, hostname, tsnetDir)
+                desiredRunning = true
                 startProxy(socks, hostname, tsnetDir)
             }
-            ACTION_STOP -> stopProxy()
+            ACTION_STOP -> {
+                desiredRunning = false
+                watchdogHandler.removeCallbacks(watchdog)
+                stopProxy()
+            }
         }
         // 2. REDELIVER 会把原始 Intent（含参数）重发，比 STICKY 稳得多
         return START_REDELIVER_INTENT
@@ -93,10 +125,19 @@ class TsProxyService : Service() {
     }
 
     private fun startProxy(socks: String, hostname: String, tsnetDir: String) {
-        if (!running.compareAndSet(false, true)) {
-            TsProxyApp.appendLog("startProxy: already running, ignore")
+        if (Tsproxy.isRunning()) {
+            running.set(true)
             return
         }
+
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastStartElapsed < RESTART_COOLDOWN_MS) {
+            return
+        }
+        lastStartElapsed = now
+        running.set(true)
+        watchdogHandler.removeCallbacks(watchdog)
+        watchdogHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
         val notification = buildNotification("Starting ts-socks5...")
         // 3. Android 10+/14 前台类型必须带上，否则后台存活时间很短
         if (Build.VERSION.SDK_INT >= 34) {
@@ -197,7 +238,10 @@ class TsProxyService : Service() {
     }
 
     override fun onDestroy() {
+        desiredRunning = false
+        watchdogHandler.removeCallbacks(watchdog)
         releaseLocks()
+        executor.shutdownNow()
         super.onDestroy()
     }
 
@@ -221,6 +265,8 @@ class TsProxyService : Service() {
         const val EXTRA_HOSTNAME = "hostname"
         const val EXTRA_TSNET_DIR = "tsnet_dir"
         private const val NOTIFICATION_ID = 1001
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
+        private const val RESTART_COOLDOWN_MS = 30_000L
 
         fun start(context: Context, socks: String, hostname: String, tsnetDir: String) {
             val intent = Intent(context, TsProxyService::class.java).apply {
